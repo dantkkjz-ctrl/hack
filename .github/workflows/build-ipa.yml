@@ -1,0 +1,91 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Build unsigned archive
+        run: |
+          set -euo pipefail
+
+          BUILD_DIR="$GITHUB_WORKSPACE/build"
+          ARCHIVE="$BUILD_DIR/DantIOSAcused.xcarchive"
+          rm -rf "$BUILD_DIR" && mkdir -p "$BUILD_DIR"
+
+          xcodebuild \
+            -project "$GITHUB_WORKSPACE/ThreeOneOSFive.xcodeproj" \
+            -scheme Cryptroic \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$ARCHIVE" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            archive 2>&1 | tee "$BUILD_DIR/build.log"
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+
+          BUILD_DIR="$GITHUB_WORKSPACE/build"
+          ARCHIVE="$BUILD_DIR/DantIOSAcused.xcarchive"
+          APP="$ARCHIVE/Products/Applications/Cryptroic.app"
+          IPA="$BUILD_DIR/DantIOSAcused-unsigned.ipa"
+
+          # Copy .3105 patch files from source into app bundle
+          PATCH_SRC="$GITHUB_WORKSPACE/ThreeOneOSFive/Patches"
+          if [ -d "$PATCH_SRC" ]; then
+            mkdir -p "$APP/Patches"
+            cp -R "$PATCH_SRC/"*.3105 "$APP/Patches/" 2>/dev/null || true
+            echo "Patches copied: $(ls "$APP/Patches/" 2>/dev/null | wc -l | tr -d ' ') files"
+          else
+            echo "No Patches folder found — skipping"
+          fi
+
+          # Also move any .3105 that xcodebuild placed at app root
+          for f in "$APP"/*.3105; do
+            [ -e "$f" ] || continue
+            mkdir -p "$APP/Patches"
+            mv "$f" "$APP/Patches/"
+          done
+
+          # Ensure plist is correct
+          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable Cryptroic" "$APP/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundlePackageType APPL"     "$APP/Info.plist" || true
+
+          # Build IPA
+          mkdir -p "$BUILD_DIR/Payload"
+          cp -R "$APP" "$BUILD_DIR/Payload/"
+          (cd "$BUILD_DIR" && zip -qry "$(basename $IPA)" Payload && rm -rf Payload)
+
+          test -s "$IPA"
+          echo "IPA size: $(du -sh "$IPA" | cut -f1)"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: DantIOSAcused-unsigned
+          path: build/DantIOSAcused-unsigned.ipa
+          retention-days: 30
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build/build.log
+          retention-days: 7
